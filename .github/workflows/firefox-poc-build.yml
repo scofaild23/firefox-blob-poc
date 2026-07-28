@@ -1,0 +1,100 @@
+# Build Firefox and run the RecvBlobURLDataRequest PoC.
+#
+# GitHub-hosted runners give 4 vCPU / 16 GiB, which clears Firefox's build
+# requirement (4 GiB minimum, 8 GiB+ recommended) — the local machine has 7.6 GiB
+# total and cannot. Public repositories get unlimited Actions minutes.
+#
+# The first run compiles from scratch and is slow (expect 2-4 h against the 6 h
+# per-job ceiling). sccache + actions/cache make later runs far quicker, so keep
+# the cache warm rather than re-running cold.
+#
+# Put this at .github/workflows/firefox-poc-build.yml in your own PUBLIC repo,
+# alongside poc-compromised-content.patch at the repo root.
+
+name: Firefox blob PoC
+
+on:
+  workflow_dispatch:          # run it by hand; nothing automatic
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350      # just under the 6-hour hard cap
+
+    steps:
+      - name: Check out this repo (patch + test live here)
+        uses: actions/checkout@v4
+        with:
+          path: poc
+
+      - name: Show runner resources
+        run: |
+          echo "== cpu ==";  nproc
+          echo "== ram ==";  free -h
+          echo "== disk =="; df -h /
+
+      - name: Cache sccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-ffx-${{ github.sha }}
+          restore-keys: sccache-ffx-
+
+      - name: Clone mozilla-unified (shallow)
+        run: |
+          git clone --depth 1 https://github.com/mozilla-firefox/firefox.git ffx
+          cd ffx && git log -1 --format='%H %ad' --date=short
+
+      - name: Bootstrap build dependencies
+        working-directory: ffx
+        run: |
+          # non-interactive: browser artifact-free build, no telemetry prompt
+          ./mach --no-interactive bootstrap --application-choice browser
+
+      - name: Apply the PoC patch
+        working-directory: ffx
+        run: |
+          git apply --verbose ../poc/poc-compromised-content.patch
+          git diff --stat
+
+      - name: Configure for a fast, debuggable build
+        working-directory: ffx
+        run: |
+          cat > mozconfig <<'EOF'
+          ac_add_options --disable-debug
+          ac_add_options --enable-optimize
+          ac_add_options --disable-tests
+          ac_add_options --enable-release
+          ac_add_options --with-ccache=sccache
+          mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/objdir
+          EOF
+          cat mozconfig
+
+      - name: Build
+        working-directory: ffx
+        run: ./mach build
+
+      - name: Run the PoC — CONTROL then ATTACK
+        working-directory: ffx
+        run: |
+          set -x
+          # CONTROL: stock behaviour, cross-origin blob read must FAIL
+          ./mach run --headless --setpref browser.tabs.remote.autostart=true \
+            ../poc/poc.html 2>&1 | tee control.log || true
+
+          # ATTACK: same binary, sender spoofs SystemPrincipal + empty partition key
+          MOZ_POC_BLOB_SPOOF=1 ./mach run --headless \
+            --setpref browser.tabs.remote.autostart=true \
+            ../poc/poc.html 2>&1 | tee attack.log || true
+
+          echo "===== CONTROL ====="; grep -iE 'POC|blob|denied|SUCCESS' control.log || true
+          echo "===== ATTACK  ====="; grep -iE 'POC|blob|denied|SUCCESS' attack.log  || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: poc-logs
+          path: |
+            ffx/control.log
+            ffx/attack.log

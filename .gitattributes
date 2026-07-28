@@ -1,0 +1,5 @@
+# Force LF everywhere. The CI runner is Linux, and a patch checked out with CRLF
+# endings makes `git apply` fail with "corrupt patch" — which would only surface
+# after the runner has already spent ~20 minutes cloning and bootstrapping.
+* text eol=lf
+*.patch -text

