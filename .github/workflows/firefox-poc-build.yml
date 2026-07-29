@@ -1,94 +1,171 @@
 # Build Firefox and run the RecvBlobURLDataRequest PoC.
 #
-# GitHub-hosted runners give 4 vCPU / 16 GiB, which clears Firefox's build
-# requirement (4 GiB minimum, 8 GiB+ recommended) — the local machine has 7.6 GiB
-# total and cannot. Public repositories get unlimited Actions minutes.
+# Run #1 died in the Build step after 28m50s with exit 143 (SIGTERM) — not the
+# 350-minute job timeout, which was nowhere near. On a 4 vCPU / 16 GiB hosted
+# runner, a SIGTERM ~29 minutes into a Firefox build lands squarely in the Rust
+# phase (style, webrender), where several rustc processes each hold multiple GiB.
+# Memory pressure that stalls the runner agent is reported exactly this way.
+# Disk is the other candidate: the default image leaves only ~21 GiB free on /,
+# and a Firefox objdir can outgrow that.
 #
-# The first run compiles from scratch and is slow (expect 2-4 h against the 6 h
-# per-job ceiling). sccache + actions/cache make later runs far quicker, so keep
-# the cache warm rather than re-running cold.
+# So this revision does four separate things:
+#   1. removes the cause     - swap, capped parallelism, a much smaller build
+#   2. removes the disk risk - everything moves to /mnt (~65 GiB free)
+#   3. makes failure cheap   - sccache is saved even when the build dies, so each
+#                              run resumes instead of restarting from zero
+#   4. makes failure legible - a background monitor logs memory and disk every
+#                              30 s, so a second failure is diagnosed, not guessed
 #
-# Put this at .github/workflows/firefox-poc-build.yml in your own PUBLIC repo,
-# alongside poc-compromised-content.patch at the repo root.
+# Nothing here touches the security-relevant code paths: webrtc, av1, a11y and
+# the wasm sandbox are unrelated to blob URLs and IPC principal handling.
 
 name: Firefox blob PoC
 
 on:
-  workflow_dispatch:          # run it by hand; nothing automatic
+  workflow_dispatch:
+
+env:
+  SRC: /mnt/ffx
+  OBJ: /mnt/objdir
+  SCCACHE_DIR: /mnt/sccache
+  SCCACHE_CACHE_SIZE: 9G
+  CARGO_BUILD_JOBS: 2
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 350      # just under the 6-hour hard cap
+    timeout-minutes: 350
 
     steps:
       - name: Check out this repo (patch + test live here)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: poc
 
-      - name: Show runner resources
+      - name: Prepare the runner — disk, swap, workspace
         run: |
-          echo "== cpu ==";  nproc
-          echo "== ram ==";  free -h
-          echo "== disk =="; df -h /
+          echo "=== before ==="; free -h; df -h / /mnt
+          # the hosted image ships ~30 GiB of toolchains this build never touches
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          # swap is what keeps rustc and the linker alive instead of being killed
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 24G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          sudo sysctl vm.swappiness=10
+          # /mnt is the big disk; / is not big enough for source + objdir
+          sudo mkdir -p "$SRC" "$OBJ" "$SCCACHE_DIR"
+          sudo chown -R "$(id -un)" /mnt
+          echo "=== after ==="; free -h; df -h / /mnt; swapon --show
 
-      - name: Cache sccache
-        uses: actions/cache@v4
+      - name: Restore sccache
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/sccache
-          key: sccache-ffx-${{ github.sha }}
-          restore-keys: sccache-ffx-
+          path: /mnt/sccache
+          key: sccache-ffx-v2-${{ github.run_id }}
+          restore-keys: sccache-ffx-v2-
 
-      - name: Clone mozilla-unified (shallow)
+      - name: Clone mozilla-firefox (shallow)
         run: |
-          git clone --depth 1 https://github.com/mozilla-firefox/firefox.git ffx
-          cd ffx && git log -1 --format='%H %ad' --date=short
+          git clone --depth 1 https://github.com/mozilla-firefox/firefox.git "$SRC"
+          git -C "$SRC" log -1 --format='%H %ad' --date=short
 
       - name: Bootstrap build dependencies
-        working-directory: ffx
-        run: |
-          # non-interactive: browser artifact-free build, no telemetry prompt
-          ./mach --no-interactive bootstrap --application-choice browser
+        run: cd "$SRC" && ./mach --no-interactive bootstrap --application-choice browser
 
       - name: Apply the PoC patch
-        working-directory: ffx
         run: |
-          git apply --verbose ../poc/poc-compromised-content.patch
+          cd "$SRC"
+          git apply --verbose "$GITHUB_WORKSPACE/poc/poc-compromised-content.patch"
           git diff --stat
 
-      - name: Configure for a fast, debuggable build
-        working-directory: ffx
+      - name: Write mozconfig
         run: |
-          cat > mozconfig <<'EOF'
+          cat > "$SRC/mozconfig" <<EOF
           ac_add_options --disable-debug
           ac_add_options --enable-optimize
-          ac_add_options --disable-tests
           ac_add_options --enable-release
+          ac_add_options --disable-tests
+          # the single biggest cut in peak memory and disk during compile and link
+          ac_add_options --disable-debug-symbols
+          ac_add_options --enable-linker=lld
+          # none of these touch blob URLs or IPC principals; all are slow to build.
+          # kept deliberately conservative — an unsupported option combination would
+          # cost another failed run, which is worse than the minutes it would save.
+          ac_add_options --disable-webrtc
+          ac_add_options --disable-crashreporter
+          ac_add_options --disable-updater
+          ac_add_options --without-wasm-sandboxed-libraries
           ac_add_options --with-ccache=sccache
-          mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/objdir
+          # 4 vCPU, but peak RSS scales with job count — 2 is the safe ceiling here
+          mk_add_options MOZ_PARALLEL_BUILD=2
+          mk_add_options MOZ_OBJDIR=$OBJ
           EOF
-          cat mozconfig
+          cat "$SRC/mozconfig"
 
       - name: Build
-        working-directory: ffx
-        run: ./mach build
+        id: build
+        continue-on-error: true      # a dead build must still save its cache
+        timeout-minutes: 290         # well under the job cap, so later steps run
+        run: |
+          # if this run dies again, the monitor output says whether it was memory
+          # or disk — no guessing a third time
+          ( while true; do
+              echo "[mon $(date -u +%H:%M:%S)] $(free -m | awk '/Mem:/{printf "mem_used=%sM avail=%sM",$3,$7}') \
+          $(free -m | awk '/Swap:/{printf " swap_used=%sM",$3}') \
+          $(df -m /mnt | awk 'NR==2{printf " mnt_free=%sM",$4}')"
+              sleep 30
+            done ) &
+          MON=$!
+          cd "$SRC"
+          set +e
+          ./mach build
+          rc=$?
+          set -e
+          kill $MON 2>/dev/null || true
+          echo "mach build exit code = $rc"
+          echo "=== final state ==="; free -h; df -h /mnt
+          sccache --show-stats || true
+          exit $rc
+
+      - name: Save sccache        # runs even when the build died, so reruns resume
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/sccache
+          key: sccache-ffx-v2-${{ github.run_id }}
+
+      - name: Did we get a binary?
+        id: check
+        run: |
+          BIN="$OBJ/dist/bin/firefox"
+          if [ -x "$BIN" ]; then
+            echo "built=yes" >> "$GITHUB_OUTPUT"
+            ls -lh "$BIN"
+          else
+            echo "built=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::No binary yet. The build made progress and the sccache"
+            echo "::warning::entry was saved — re-run this workflow to continue."
+            ls -la "$OBJ/dist/bin" 2>/dev/null | head || echo "(no dist/bin)"
+          fi
 
       - name: Run the PoC — CONTROL then ATTACK
-        working-directory: ffx
+        if: steps.check.outputs.built == 'yes'
         run: |
           set -x
-          # CONTROL: stock behaviour, cross-origin blob read must FAIL
+          cd "$SRC"
           ./mach run --headless --setpref browser.tabs.remote.autostart=true \
-            ../poc/poc.html 2>&1 | tee control.log || true
+            "$GITHUB_WORKSPACE/poc/poc.html" 2>&1 | tee control.log || true
 
-          # ATTACK: same binary, sender spoofs SystemPrincipal + empty partition key
           MOZ_POC_BLOB_SPOOF=1 ./mach run --headless \
             --setpref browser.tabs.remote.autostart=true \
-            ../poc/poc.html 2>&1 | tee attack.log || true
+            "$GITHUB_WORKSPACE/poc/poc.html" 2>&1 | tee attack.log || true
 
-          echo "===== CONTROL ====="; grep -iE 'POC|blob|denied|SUCCESS' control.log || true
-          echo "===== ATTACK  ====="; grep -iE 'POC|blob|denied|SUCCESS' attack.log  || true
+          echo "===== CONTROL ====="; grep -iE 'POC-OUTCOME|\[POC\]|spoofing' control.log || true
+          echo "===== ATTACK  ====="; grep -iE 'POC-OUTCOME|\[POC\]|spoofing' attack.log  || true
 
       - name: Upload logs
         if: always()
@@ -96,5 +173,13 @@ jobs:
         with:
           name: poc-logs
           path: |
-            ffx/control.log
-            ffx/attack.log
+            /mnt/ffx/control.log
+            /mnt/ffx/attack.log
+          if-no-files-found: ignore
+
+      - name: Fail the run if the build never finished
+        if: steps.check.outputs.built != 'yes'
+        run: |
+          echo "Build did not produce a binary this run — see the [mon ...] lines"
+          echo "in the Build step for whether memory or disk was the constraint."
+          exit 1
