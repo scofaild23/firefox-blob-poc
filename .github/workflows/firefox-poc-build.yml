@@ -29,7 +29,7 @@ env:
   OBJ: /mnt/objdir
   SCCACHE_DIR: /mnt/sccache
   SCCACHE_CACHE_SIZE: 9G
-  CARGO_BUILD_JOBS: 2
+  CARGO_BUILD_JOBS: 3
 
 jobs:
   build-and-test:
@@ -100,8 +100,10 @@ jobs:
           ac_add_options --disable-updater
           ac_add_options --without-wasm-sandboxed-libraries
           ac_add_options --with-ccache=sccache
-          # 4 vCPU, but peak RSS scales with job count — 2 is the safe ceiling here
-          mk_add_options MOZ_PARALLEL_BUILD=2
+          # 4 vCPU, but peak RSS scales with job count. 3 rather than 2: with swap
+          # in place nothing gets killed, and dropping to 2 risks not finishing
+          # inside the step cap — which costs a whole extra run.
+          mk_add_options MOZ_PARALLEL_BUILD=3
           mk_add_options MOZ_OBJDIR=$OBJ
           EOF
           cat "$SRC/mozconfig"
