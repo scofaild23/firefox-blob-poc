@@ -123,10 +123,18 @@ jobs:
             done ) &
           MON=$!
           cd "$SRC"
+          # Run #2 exited 0 in 21 minutes and left nothing at $OBJ — far too fast
+          # for a cold build. Print what mach actually resolved before trusting it.
+          echo "===== mach environment ====="
+          ./mach environment || true
+          echo "===== mozconfig in effect ====="
+          ./mach environment 2>/dev/null | grep -i "mozconfig\|topobjdir" || true
           set +e
-          ./mach build
-          rc=$?
+          ./mach build 2>&1 | tee /mnt/build.log
+          rc=${PIPESTATUS[0]}
           set -e
+          echo "===== last 60 lines of build output ====="
+          tail -60 /mnt/build.log
           kill $MON 2>/dev/null || true
           echo "mach build exit code = $rc"
           echo "=== final state ==="; free -h; df -h /mnt
@@ -143,16 +151,32 @@ jobs:
       - name: Did we get a binary?
         id: check
         run: |
-          BIN="$OBJ/dist/bin/firefox"
-          if [ -x "$BIN" ]; then
+          # Do not assume the objdir: run #2 built with exit 0 and left $OBJ empty,
+          # which means mach resolved a different topobjdir than the mozconfig asked
+          # for. Search for the binary instead of trusting a hardcoded path.
+          BIN=$(find /mnt "$SRC" -maxdepth 6 -type f -name firefox -perm -u+x 2>/dev/null | head -1)
+          echo "search result: ${BIN:-<none>}"
+          if [ -n "$BIN" ]; then
             echo "built=yes" >> "$GITHUB_OUTPUT"
+            echo "bin=$BIN"  >> "$GITHUB_OUTPUT"
             ls -lh "$BIN"
           else
             echo "built=no" >> "$GITHUB_OUTPUT"
-            echo "::warning::No binary yet. The build made progress and the sccache"
-            echo "::warning::entry was saved — re-run this workflow to continue."
-            ls -la "$OBJ/dist/bin" 2>/dev/null | head || echo "(no dist/bin)"
+            echo "::error::No firefox binary anywhere under /mnt or $SRC."
+            echo "--- objdir candidates ---"
+            find /mnt "$SRC" -maxdepth 3 -type d -name "obj*" 2>/dev/null | head
+            echo "--- dist/bin contents ---"
+            find /mnt "$SRC" -maxdepth 5 -type d -path "*dist/bin" 2>/dev/null | head |
+              while read -r d; do echo "== $d"; ls -la "$d" | head -20; done
           fi
+
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /mnt/build.log
+          if-no-files-found: warn
 
       - name: Run the PoC — CONTROL then ATTACK
         if: steps.check.outputs.built == 'yes'
