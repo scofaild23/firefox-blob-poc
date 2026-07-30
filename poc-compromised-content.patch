@@ -1,17 +1,18 @@
 diff --git a/dom/file/uri/BlobURLInputStream.cpp b/dom/file/uri/BlobURLInputStream.cpp
-index a1c25b54..bf7576ec 100644
+index a1c25b5..d1a2b6a 100644
 --- a/dom/file/uri/BlobURLInputStream.cpp
 +++ b/dom/file/uri/BlobURLInputStream.cpp
-@@ -5,6 +5,8 @@
+@@ -5,6 +5,9 @@
  #include "BlobURLInputStream.h"
  
  #include "BlobURL.h"
 +#include "nsContentUtils.h"
 +#include "prenv.h"
++#include "mozilla/Printf.h"
  #include "BlobURLChannel.h"
  #include "BlobURLProtocolHandler.h"
  #include "mozilla/ScopeExit.h"
-@@ -438,11 +440,27 @@ void BlobURLInputStream::RetrieveBlobData(const MutexAutoLock& aProofOfLock) {
+@@ -438,11 +441,27 @@ void BlobURLInputStream::RetrieveBlobData(const MutexAutoLock& aProofOfLock) {
  
    cleanupOnEarlyExit.release();
  
