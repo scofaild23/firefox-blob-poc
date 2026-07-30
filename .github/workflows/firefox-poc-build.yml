@@ -145,6 +145,17 @@ jobs:
           echo "===== last 80 lines of build output ====="
           tail -80 /mnt/build.log
           echo "mach build exit code = $rc"
+          if [ "$rc" -ne 0 ]; then
+            # An annotation is the only part of a run that is readable WITHOUT
+            # signing in to GitHub, so the failure has to travel out through one.
+            # Newlines must be percent-encoded or the annotation stops at line 1.
+            ERR=$(grep -aEi -m 25 '(^| )(error|fatal|cannot|undefined reference|no such file)' \
+                    /mnt/build.log \
+                  | cut -c1-300 \
+                  | sed 's/%/%25/g; s/\r//g' \
+                  | awk '{printf "%s%%0A", $0}')
+            echo "::error title=mach build failed (exit $rc)::${ERR:-no error lines matched in build.log}"
+          fi
           echo "=== final state ==="; free -h; df -h /mnt
           sccache --show-stats || true
           exit $rc
