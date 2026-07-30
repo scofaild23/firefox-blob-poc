@@ -1,5 +1,5 @@
 diff --git a/dom/file/uri/BlobURLInputStream.cpp b/dom/file/uri/BlobURLInputStream.cpp
-index a1c25b5..d1a2b6a 100644
+index a1c25b5..b7faca9 100644
 --- a/dom/file/uri/BlobURLInputStream.cpp
 +++ b/dom/file/uri/BlobURLInputStream.cpp
 @@ -5,6 +5,9 @@
@@ -12,7 +12,7 @@ index a1c25b5..d1a2b6a 100644
  #include "BlobURLChannel.h"
  #include "BlobURLProtocolHandler.h"
  #include "mozilla/ScopeExit.h"
-@@ -438,11 +441,27 @@ void BlobURLInputStream::RetrieveBlobData(const MutexAutoLock& aProofOfLock) {
+@@ -438,11 +441,31 @@ void BlobURLInputStream::RetrieveBlobData(const MutexAutoLock& aProofOfLock) {
  
    cleanupOnEarlyExit.release();
  
@@ -21,7 +21,11 @@ index a1c25b5..d1a2b6a 100644
 +  // whatever it does next is entirely the parent's own logic.
 +  nsCOMPtr<nsIPrincipal> pocTriggering = triggeringPrincipal;
 +  nsCOMPtr<nsIPrincipal> pocLoading = loadingPrincipal;
-+  nsAutoCString pocPartKey(NS_ConvertUTF16toUTF8(partKey));
++  // Declared and assigned separately on purpose: the one-liner form
++  // nsAutoCString pocPartKey(NS_ConvertUTF16toUTF8(partKey));
++  // is a most-vexing-parse and compiles as a FUNCTION declaration.
++  nsAutoCString pocPartKey;
++  pocPartKey.Assign(NS_ConvertUTF16toUTF8(partKey));
 +  if (PR_GetEnv("MOZ_POC_BLOB_SPOOF")) {
 +    nsCOMPtr<nsIPrincipal> sysPrincipal = nsContentUtils::GetSystemPrincipal();
 +    pocTriggering = sysPrincipal;
