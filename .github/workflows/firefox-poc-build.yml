@@ -133,9 +133,17 @@ jobs:
           ./mach build 2>&1 | tee /mnt/build.log
           rc=${PIPESTATUS[0]}
           set -e
-          echo "===== last 60 lines of build output ====="
-          tail -60 /mnt/build.log
           kill $MON 2>/dev/null || true
+          # Run #2 exited 2 — a build error, not the OOM (143) that killed run #1.
+          # `tail` alone is the wrong tool here: mach prints a summary last and the
+          # real cause scrolls past long before that. Show the FIRST errors, which
+          # is where a configure failure or a bad patch hunk actually announces
+          # itself, and only then the tail.
+          echo "===== first 40 error/warning lines ====="
+          grep -nEi -m 40 '(^| )(error|fatal|cannot|undefined reference|no such file)' \
+            /mnt/build.log || echo "(no lines matched)"
+          echo "===== last 80 lines of build output ====="
+          tail -80 /mnt/build.log
           echo "mach build exit code = $rc"
           echo "=== final state ==="; free -h; df -h /mnt
           sccache --show-stats || true
@@ -175,7 +183,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: /mnt/build.log
+          # config.log matters as much as build.log: if the failure is in configure
+          # rather than compilation, build.log says almost nothing and config.log
+          # says exactly which option was rejected.
+          path: |
+            /mnt/build.log
+            /mnt/objdir/config.log
+            /mnt/objdir/configure.log
           if-no-files-found: warn
 
       - name: Run the PoC — CONTROL then ATTACK
